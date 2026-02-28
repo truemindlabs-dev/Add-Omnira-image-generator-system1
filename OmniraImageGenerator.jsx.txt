@@ -1,0 +1,650 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+
+// ============================================================
+// CONFIG — Ganti URL ini dengan URL server kamu setelah deploy
+// Biarkan default untuk mode offline/demo (Canvas generator)
+// ============================================================
+const API_BASE = "http://localhost:8000/api"; // ← Ganti dengan URL server kamu
+
+// ============================================================
+// AUTH HEADERS (Base44 inject user info otomatis)
+// ============================================================
+function getAuthHeaders() {
+  const w = typeof window !== "undefined" ? window : {};
+  const token  = w.__BASE44_USER_TOKEN__  || "";
+  const userId = w.__BASE44_USER_ID__     || "local_user";
+  const email  = w.__BASE44_USER_EMAIL__  || "demo@omnira.ai";
+  return {
+    "Content-Type": "application/json",
+    ...(token  && { Authorization: `Bearer ${token}` }),
+    ...(userId && { "X-User-Id": userId }),
+    ...(email  && { "X-User-Email": email }),
+  };
+}
+
+// ============================================================
+// CANVAS IMAGE GENERATOR — runs in browser, TRUE RGBA ALPHA
+// ============================================================
+function hexToRgb(hex) {
+  const n = parseInt(hex.replace("#",""), 16);
+  return [(n>>16)&255, (n>>8)&255, n&255];
+}
+
+function promptToColors(prompt) {
+  const p = prompt.toLowerCase();
+  const map = [
+    [["merah","red","mawar","rose","api","cinta"],    ["#DC3C50","#FF7850","#B41428"]],
+    [["biru","blue","laut","ocean","langit","sky"],   ["#1E64DC","#50B4FF","#0A3CA0"]],
+    [["hijau","green","alam","hutan","forest"],       ["#28B450","#64DC78","#147832"]],
+    [["kuning","yellow","emas","gold","matahari"],    ["#FFC81E","#FFF064","#C88C00"]],
+    [["ungu","purple","violet","mistis","magic"],     ["#8C32C8","#C864FF","#50148C"]],
+    [["orange","jingga","senja","sunset"],            ["#FF7820","#FFB450","#C84608"]],
+    [["pink","merah muda","sakura","cherry"],         ["#FF64A0","#FFB4D2","#C83278"]],
+    [["cyan","tosca","turquoise"],                    ["#00B4C8","#50DDE6","#007888"]],
+  ];
+  for (const [keys, cols] of map) {
+    if (keys.some(k => p.includes(k))) return cols.map(hexToRgb);
+  }
+  let h = 0;
+  for (let i=0;i<prompt.length;i++) h = (h*31+prompt.charCodeAt(i)) & 0xFFFFFF;
+  const hue = (h % 360) / 360;
+  function hsvRgb(h,s,v) {
+    const i=Math.floor(h*6),f=h*6-i,p=v*(1-s),q=v*(1-f*s),t=v*(1-(1-f)*s);
+    return [[v,t,p],[q,v,p],[p,v,t],[p,q,v],[t,p,v],[v,p,q]][i%6].map(x=>Math.round(x*255));
+  }
+  return [hsvRgb(hue,0.7,0.9), hsvRgb((hue+0.3)%1,0.6,1), hsvRgb((hue+0.6)%1,0.8,0.7)];
+}
+
+function detectStyle(prompt) {
+  const p = prompt.toLowerCase();
+  if (["bunga","flower","rose","mawar","sakura","lotus","dahlia","tulip","petal","bloom"].some(k=>p.includes(k))) return "flower";
+  if (["isometric","isometri","3d","cube","kubus","kota","city","voxel"].some(k=>p.includes(k))) return "isometric";
+  if (["mandala","simetri","spiritual"].some(k=>p.includes(k))) return "mandala";
+  if (["gelombang","wave","cair","ombak"].some(k=>p.includes(k))) return "wave";
+  if (["cahaya","glow","neon","bercahaya"].some(k=>p.includes(k))) return "glow";
+  if (["bintang","star","sinar","burst"].some(k=>p.includes(k))) return "starburst";
+  if (["gradien","gradient","pelangi","rainbow"].some(k=>p.includes(k))) return "gradient";
+  if (["pixel","piksel","retro"].some(k=>p.includes(k))) return "pixel";
+  if (["badge","icon","logo"].some(k=>p.includes(k))) return "badge";
+  return "geometric";
+}
+
+function seededRng(seed) {
+  let s = (seed||12345) % 2147483647;
+  return () => { s=(s*16807)%2147483647; return (s-1)/2147483646; };
+}
+
+function lerpC(a,b,t) { return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t]; }
+
+function generateCanvasImage(prompt, style, width, height, seedVal) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, width, height); // TRUE ALPHA — transparan penuh
+
+  const actualStyle = style === "auto" ? detectStyle(prompt) : style;
+  const [c1,c2,c3] = promptToColors(prompt);
+  const seed = seedVal || Math.abs(prompt.split("").reduce((a,c)=>a+c.charCodeAt(0),0));
+  const rng  = seededRng(seed);
+  const cx   = width/2, cy = height/2;
+  const rgba = (c,a) => `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},${a})`;
+
+  if (actualStyle === "geometric") {
+    for (let i=8;i>=1;i--) {
+      const r=(Math.min(width,height)/2-10)*(i/8), ang=rng()*Math.PI*2;
+      const s=[5,6,7,8][Math.floor(rng()*4)], col=[c1,c2,c3][i%3];
+      ctx.beginPath();
+      for (let j=0;j<s;j++) { const a=ang+j*(2*Math.PI/s); j===0?ctx.moveTo(cx+r*Math.cos(a),cy+r*Math.sin(a)):ctx.lineTo(cx+r*Math.cos(a),cy+r*Math.sin(a)); }
+      ctx.closePath(); ctx.fillStyle=rgba(col,0.65*(i/8)); ctx.fill();
+    }
+    const g=ctx.createRadialGradient(cx,cy,0,cx,cy,Math.min(width,height)/6);
+    g.addColorStop(0,rgba(c1,0.95)); g.addColorStop(1,rgba(c1,0));
+    ctx.beginPath(); ctx.arc(cx,cy,Math.min(width,height)/6,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
+  }
+
+  else if (actualStyle === "gradient") {
+    const g=ctx.createRadialGradient(cx*0.7,cy*0.6,0,cx,cy,Math.max(width,height)*0.7);
+    g.addColorStop(0,rgba(c1,0.95)); g.addColorStop(0.5,rgba(c2,0.7)); g.addColorStop(1,rgba(c3,0));
+    ctx.beginPath(); ctx.arc(cx,cy,Math.max(width,height)*0.55,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
+    for (let i=0;i<3;i++) {
+      const gx=cx+(rng()-0.5)*width*0.5, gy=cy+(rng()-0.5)*height*0.5;
+      const gr=ctx.createRadialGradient(gx,gy,0,gx,gy,width*0.3);
+      gr.addColorStop(0,rgba([c1,c2,c3][i],0.35)); gr.addColorStop(1,rgba(c2,0));
+      ctx.beginPath(); ctx.arc(gx,gy,width*0.3,0,Math.PI*2); ctx.fillStyle=gr; ctx.fill();
+    }
+  }
+
+  else if (actualStyle === "glow") {
+    const sources=[[cx,cy,c1,Math.min(width,height)*0.4]];
+    for (let i=0;i<4;i++) sources.push([cx+(rng()-0.5)*width*0.5,cy+(rng()-0.5)*height*0.5,[c1,c2,c3][i%3],width*0.2]);
+    for (const [sx,sy,col,mr] of sources) {
+      const gr=ctx.createRadialGradient(sx,sy,0,sx,sy,mr);
+      gr.addColorStop(0,rgba(col,0.5)); gr.addColorStop(0.4,rgba(col,0.2)); gr.addColorStop(1,rgba(col,0));
+      ctx.beginPath(); ctx.arc(sx,sy,mr,0,Math.PI*2); ctx.fillStyle=gr; ctx.fill();
+    }
+    ctx.beginPath(); ctx.arc(cx,cy,Math.min(width,height)/14,0,Math.PI*2); ctx.fillStyle=rgba([255,255,255],0.9); ctx.fill();
+  }
+
+  else if (actualStyle === "starburst") {
+    const imgD=ctx.createImageData(width,height), d=imgD.data, rays=16, maxR=Math.min(width,height)/2;
+    for (let y=0;y<height;y++) for (let x=0;x<width;x++) {
+      const dx=x-cx, dy=y-cy, r=Math.sqrt(dx*dx+dy*dy), ang=Math.atan2(dy,dx);
+      const rad=Math.max(0,1-r/maxR), ray=0.5+0.5*Math.cos(rays*ang), t=ray*0.7+0.3*0.5;
+      const col=lerpC(c1,c2,t), a=Math.round(rad*(ray*0.8+0.2)*255);
+      const idx=(y*width+x)*4; d[idx]=col[0]; d[idx+1]=col[1]; d[idx+2]=col[2]; d[idx+3]=a;
+    }
+    ctx.putImageData(imgD,0,0);
+  }
+
+  else if (actualStyle === "mandala") {
+    for (let l=6;l>=1;l--) {
+      const r=(Math.min(width,height)/2-10)*(l/6), col=[c1,c2,c3][l%3], a=0.75*(l/6), petals=8*(l%3+2);
+      for (let i=0;i<petals;i++) {
+        const ang=i*(2*Math.PI/petals), pr=Math.max(5,r*0.12);
+        ctx.beginPath(); ctx.arc(cx+r*Math.cos(ang),cy+r*Math.sin(ang),pr,0,Math.PI*2);
+        ctx.fillStyle=rgba(col,a); ctx.fill();
+      }
+    }
+    const g=ctx.createRadialGradient(cx,cy,0,cx,cy,Math.min(width,height)/10);
+    g.addColorStop(0,rgba([255,255,255],1)); g.addColorStop(1,rgba(c1,0.9));
+    ctx.beginPath(); ctx.arc(cx,cy,Math.min(width,height)/10,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
+  }
+
+  else if (actualStyle === "wave") {
+    const imgD=ctx.createImageData(width,height), d=imgD.data;
+    const waves=[[0.03,rng()*6.28,0.5],[0.02,rng()*6.28,0.4],[0.04,rng()*6.28,0.3]];
+    for (let y=0;y<height;y++) for (let x=0;x<width;x++) {
+      let v=0; for (const [f,ph,amp] of waves) v+=amp*Math.sin(f*x*Math.PI*2+ph+y*0.01);
+      v=Math.max(0,Math.min(1,(v+1.5)/3));
+      const col=lerpC(c1,c2,v);
+      const a=Math.min(255,Math.round(255*(0.4+0.6*v)*Math.max(0,1-Math.abs(y/height-0.5)*1.5)));
+      const idx=(y*width+x)*4; d[idx]=Math.round(col[0]); d[idx+1]=Math.round(col[1]); d[idx+2]=Math.round(col[2]); d[idx+3]=a;
+    }
+    ctx.putImageData(imgD,0,0);
+  }
+
+  else if (actualStyle === "badge") {
+    const pad=width/8, rr=width/10;
+    ctx.beginPath(); ctx.roundRect(pad,pad,width-2*pad,height-2*pad,rr);
+    ctx.fillStyle=rgba(c1,0.2); ctx.fill();
+    ctx.strokeStyle=rgba(c2,0.7); ctx.lineWidth=3; ctx.stroke();
+    ctx.beginPath(); ctx.roundRect(pad+10,pad+10,width-2*pad-20,(height-2*pad)*0.18,rr);
+    ctx.fillStyle=rgba([255,255,255],0.12); ctx.fill();
+    ctx.beginPath();
+    for (let i=0;i<10;i++) {
+      const ang=i*36*Math.PI/180-Math.PI/2, r3=i%2===0?width/5:width/10;
+      i===0?ctx.moveTo(cx+r3*Math.cos(ang),cy+r3*Math.sin(ang)):ctx.lineTo(cx+r3*Math.cos(ang),cy+r3*Math.sin(ang));
+    }
+    ctx.closePath(); ctx.fillStyle=rgba(c1,0.9); ctx.fill();
+    ctx.strokeStyle=rgba([255,255,220],0.8); ctx.lineWidth=2; ctx.stroke();
+  }
+
+  else if (actualStyle === "pixel") {
+    const cell=Math.max(14,Math.min(width,height)/18), palette=[c1,c2,c3,[255,255,255],[50,50,50]];
+    for (let gy=0;gy*cell<height;gy++) for (let gx=0;gx*cell<width;gx++) {
+      if (rng()<0.28) continue;
+      ctx.fillStyle=rgba(palette[Math.floor(rng()*palette.length)], 0.6+rng()*0.4);
+      ctx.fillRect(gx*cell,gy*cell,cell-1,cell-1);
+    }
+  }
+
+  // ── FLOWER ──
+  else if (actualStyle === "flower") {
+    const p2=prompt.toLowerCase();
+    let petals=6, layers=4, pRatio=0.42, fc1=c1, fc2=c2, fc3=c3;
+    if (["mawar","rose"].some(k=>p2.includes(k)))            { petals=5; fc1=[200,30,50];   fc2=[240,80,100];  fc3=[255,160,140]; }
+    else if (["sakura","cherry"].some(k=>p2.includes(k)))    { petals=5; pRatio=0.38; fc1=[255,160,180]; fc2=[255,200,210]; fc3=[255,230,235]; }
+    else if (["lotus","teratai"].some(k=>p2.includes(k)))    { petals=8; fc1=[220,100,160]; fc2=[240,150,190]; fc3=[255,220,230]; }
+    else if (["matahari","sunflower"].some(k=>p2.includes(k))){ petals=13; layers=2; pRatio=0.5; fc1=[255,200,20]; fc2=[255,220,60]; fc3=[200,130,20]; }
+    else if (["dahlia"].some(k=>p2.includes(k)))             { petals=12; layers=5; pRatio=0.35; fc1=[180,40,120]; fc2=[220,80,160]; fc3=[255,140,200]; }
+
+    const maxR=Math.min(width,height)*0.44;
+
+    // Aura
+    const aura=ctx.createRadialGradient(cx,cy,0,cx,cy,maxR*0.9);
+    aura.addColorStop(0,rgba(fc2,0.16)); aura.addColorStop(1,rgba(fc2,0));
+    ctx.beginPath(); ctx.arc(cx,cy,maxR*0.9,0,Math.PI*2); ctx.fillStyle=aura; ctx.fill();
+
+    // Kelopak berlapis
+    for (let l=0;l<layers;l++) {
+      const t=l/Math.max(layers-1,1), lr=maxR*(1-t*0.55);
+      const pH=lr*pRatio*(1-t*0.2), pW=lr*0.30*(1+t*0.15);
+      const rotOff=(l%2)*Math.PI/petals, col=lerpC(fc1,fc2,t), alpha=0.78+0.18*t;
+      for (let pi=0;pi<petals;pi++) {
+        const ang=rotOff+pi*(2*Math.PI/petals);
+        const pvx=cx+lr*0.52*Math.cos(ang), pvy=cy+lr*0.52*Math.sin(ang);
+        ctx.save(); ctx.translate(pvx,pvy); ctx.rotate(ang+Math.PI/2);
+        ctx.beginPath(); ctx.ellipse(0,-pH*0.3,pW,pH*0.85,0,0,Math.PI*2);
+        const g=ctx.createRadialGradient(0,-pH*0.1,0,0,pH*0.3,pH);
+        g.addColorStop(0,rgba(fc2,alpha)); g.addColorStop(0.6,rgba(col,alpha)); g.addColorStop(1,rgba(fc1,alpha*0.55));
+        ctx.fillStyle=g; ctx.fill();
+        // Vena
+        ctx.beginPath(); ctx.moveTo(0,pH*0.4); ctx.lineTo(0,-pH*0.7);
+        ctx.strokeStyle=rgba([255,255,255],0.22); ctx.lineWidth=1.2; ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Putik
+    const stR=maxR*0.13;
+    const sg=ctx.createRadialGradient(cx,cy,0,cx,cy,stR);
+    sg.addColorStop(0,rgba([255,245,180],1)); sg.addColorStop(1,rgba(fc3,0.95));
+    ctx.beginPath(); ctx.arc(cx,cy,stR,0,Math.PI*2); ctx.fillStyle=sg; ctx.fill();
+    for (let i=0;i<8;i++) {
+      const ang=i*(Math.PI/4);
+      ctx.beginPath(); ctx.arc(cx+stR*0.72*Math.cos(ang),cy+stR*0.72*Math.sin(ang),stR*0.14,0,Math.PI*2);
+      ctx.fillStyle=rgba([255,210,30],0.9); ctx.fill();
+    }
+
+    // Gloss
+    const gl=ctx.createRadialGradient(cx-maxR*0.15,cy-maxR*0.3,0,cx,cy,maxR*0.4);
+    gl.addColorStop(0,rgba([255,255,255],0.2)); gl.addColorStop(1,rgba([255,255,255],0));
+    ctx.beginPath(); ctx.arc(cx,cy,maxR*0.4,0,Math.PI*2); ctx.fillStyle=gl; ctx.fill();
+  }
+
+  // ── ISOMETRIC ──
+  else if (actualStyle === "isometric") {
+    const scale=Math.min(width,height)/9, ox=cx, oy=height*0.62;
+    const p2=prompt.toLowerCase();
+    const isCity=["kota","city","building","gedung","urban"].some(k=>p2.includes(k));
+
+    function iso(x,y,z) {
+      return [ox+(x-y)*Math.cos(Math.PI/6)*scale, oy+((x+y)*Math.sin(Math.PI/6)-z)*scale];
+    }
+    function sh(col,f) { return col.map(v=>Math.max(0,Math.min(255,Math.round(v*f)))); }
+
+    function cube(x,y,z,sx,sy,sz,col,a=0.9) {
+      const C={};
+      for (let dx of [0,sx]) for (let dy of [0,sy]) for (let dz of [0,sz])
+        C[`${dx>0?1:0}${dy>0?1:0}${dz>0?1:0}`]=iso(x+dx,y+dy,z+dz);
+      const face=(pts,factor)=>{
+        ctx.beginPath();
+        pts.forEach(([px,py],i)=>i===0?ctx.moveTo(px,py):ctx.lineTo(px,py));
+        ctx.closePath(); ctx.fillStyle=rgba(sh(col,factor),a); ctx.fill();
+        ctx.strokeStyle=rgba(sh(col,0.5),a*0.7); ctx.lineWidth=0.7; ctx.stroke();
+      };
+      face([C["001"],C["101"],C["111"],C["011"]],1.15); // top
+      face([C["000"],C["001"],C["011"],C["010"]],0.75); // left
+      face([C["100"],C["101"],C["111"],C["110"]],0.55); // right
+    }
+
+    // Ground
+    for (let gx=-3;gx<=3;gx++) for (let gy=-3;gy<=3;gy++) {
+      if (Math.abs(gx)+Math.abs(gy)<=4) {
+        cube(gx,gy,0,1,1,0.25,c3.map(v=>Math.max(0,Math.min(255,v-Math.round(rng()*18)))),0.8);
+      }
+    }
+
+    if (!isCity) {
+      // Flower garden isometric
+      const pos=[[-0.5,-0.5],[1.2,-0.8],[-1.5,-0.3],[0.5,1.0],[-0.8,1.5],[2,0.3],[-2.2,0.8]];
+      for (const [fx,fy] of pos) {
+        const sh2=1.5+rng()*1.5;
+        cube(fx-0.1,fy-0.1,0.25,0.2,0.2,sh2,[30+Math.round(rng()*20),150+Math.round(rng()*30),50],0.95);
+        const fz=0.25+sh2, fc=c1.map(v=>Math.max(0,Math.min(255,v+Math.round((rng()-0.5)*40))));
+        for (const [ofx,ofy] of [[-0.2,0],[0.2,0],[0,-0.2],[0,0.2]]) cube(fx+ofx-0.12,fy+ofy-0.12,fz,0.25,0.25,0.18,fc,0.92);
+        cube(fx-0.12,fy-0.12,fz+0.16,0.25,0.25,0.22,[255,215,40],1);
+      }
+      for (let i=0;i<7;i++) cube(-2.5+rng()*5,-2.5+rng()*5,0.25,0.55,0.14,0.07,[45,170,65],0.85);
+    } else {
+      // City
+      const blds=[[0,0,2.5,c1],[-2,-1,1.8,c2],[2,-1,2,c2],[-1,1.5,1.4,c3],[1,1.5,1.2,c3],[-3,0.5,1,c1],[3,0.5,1.3,c2]];
+      for (const [bx,by,bh,bc] of blds) {
+        const bw=0.7+rng()*0.5, bd=0.7+rng()*0.5;
+        cube(bx-bw/2,by-bd/2,0.25,bw,bd,bh,bc,0.92);
+        cube(bx-bw/2+0.1,by-bd/2+0.1,0.25+bh,bw-0.2,bd-0.2,0.15,bc.map(v=>Math.min(255,v+40)),0.95);
+        for (let wi=0;wi<Math.floor(bh);wi++) cube(bx-bw/4,by-bd/4,0.5+wi*0.85,0.15,0.15,0.2,[200,230,255],0.7);
+      }
+    }
+  }
+
+  else {
+    // Fallback gradient
+    const g=ctx.createRadialGradient(cx,cy,0,cx,cy,Math.min(width,height)/2);
+    g.addColorStop(0,rgba(c1,0.9)); g.addColorStop(0.6,rgba(c2,0.5)); g.addColorStop(1,rgba(c3,0));
+    ctx.beginPath(); ctx.arc(cx,cy,Math.min(width,height)/2,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
+  }
+
+  return canvas.toDataURL("image/png");
+}
+
+// ============================================================
+// SERVER API FUNCTIONS
+// ============================================================
+async function apiGenerateImage({ prompt, width, height, style, seed }) {
+  const res = await fetch(`${API_BASE}/generate-image`, {
+    method:"POST", headers:getAuthHeaders(),
+    body:JSON.stringify({ prompt, width, height, style:style||"auto", seed:seed||null, return_format:"base64" }),
+  });
+  if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.detail||`Server error ${res.status}`); }
+  return res.json();
+}
+
+async function apiGetHistory() {
+  try {
+    const res=await fetch(`${API_BASE}/user/history?limit=12`,{headers:getAuthHeaders()});
+    if (!res.ok) return {history:[]};
+    return res.json();
+  } catch { return {history:[]}; }
+}
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const STYLES = [
+  {value:"auto",      label:"✨ Auto",       desc:"Deteksi dari prompt"},
+  {value:"flower",    label:"🌸 Flower",     desc:"Bunga artistik RGBA"},
+  {value:"isometric", label:"🏛️ Isometric",  desc:"Scene 3D isometric"},
+  {value:"geometric", label:"⬡ Geometric",   desc:"Bentuk abstrak"},
+  {value:"gradient",  label:"🌈 Gradient",   desc:"Warna mengalir"},
+  {value:"glow",      label:"💡 Glow",       desc:"Efek cahaya"},
+  {value:"starburst", label:"⭐ Starburst",  desc:"Sinar radial"},
+  {value:"mandala",   label:"🔮 Mandala",    desc:"Pola simetri"},
+  {value:"wave",      label:"🌊 Wave",       desc:"Gelombang cair"},
+  {value:"badge",     label:"🛡️ Badge",     desc:"Icon kaca"},
+  {value:"pixel",     label:"🎮 Pixel",      desc:"Retro pixel art"},
+];
+
+const RESOLUTIONS = [
+  {label:"256×256",w:256,h:256}, {label:"512×512",w:512,h:512},
+  {label:"512×768",w:512,h:768}, {label:"768×512",w:768,h:512},
+];
+
+const SAMPLE_PROMPTS = [
+  "Bunga mawar merah indah","Sakura pink blossom","Isometric city neon",
+  "Isometric taman bunga","Mandala biru spiritual","Glow neon hijau",
+  "Gelombang ombak laut","Bintang sinar emas","Bunga lotus ungu",
+];
+
+// ============================================================
+// MAIN COMPONENT
+// ============================================================
+export default function OmniraImageGenerator() {
+  const [prompt,   setPrompt]   = useState("");
+  const [style,    setStyle]    = useState("auto");
+  const [res,      setRes]      = useState(RESOLUTIONS[1]);
+  const [seed,     setSeed]     = useState("");
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState(null);
+  const [result,   setResult]   = useState(null);
+  const [history,  setHistory]  = useState([]);
+  const [tab,      setTab]      = useState("generate");
+  const [progress, setProgress] = useState(0);
+  const [useServer,setUseServer]= useState(false);
+  const progRef = useRef(null);
+
+  useEffect(()=>{ if(useServer) loadHistory(); },[useServer]);
+
+  useEffect(()=>{
+    if (loading) {
+      setProgress(0); let p=0;
+      progRef.current=setInterval(()=>{ p=Math.min(p+Math.random()*10,88); setProgress(p); },150);
+    } else {
+      clearInterval(progRef.current);
+      if (result) setTimeout(()=>setProgress(100),100);
+    }
+    return ()=>clearInterval(progRef.current);
+  },[loading]);
+
+  const loadHistory = async()=>{
+    try { const d=await apiGetHistory(); setHistory(d.history||[]); } catch{}
+  };
+
+  const handleGenerate = useCallback(async()=>{
+    if (!prompt.trim()) return;
+    setLoading(true); setError(null); setResult(null);
+    try {
+      let r;
+      if (useServer) {
+        const d=await apiGenerateImage({prompt:prompt.trim(),width:res.w,height:res.h,style,seed:seed?parseInt(seed):null});
+        r={ image_url:d.image_url, image_data:d.image_data, prompt:d.prompt, user_id:d.user_id, user_email:d.user_email,
+            style_used:d.style_used, resolution:d.resolution, timestamp:d.timestamp, alpha_verified:d.alpha_verified };
+      } else {
+        await new Promise(ok=>setTimeout(ok,500));
+        const dataUrl=generateCanvasImage(prompt.trim(),style,res.w,res.h,seed?parseInt(seed):null);
+        const actual=style==="auto"?detectStyle(prompt.trim()):style;
+        r={ image_url:dataUrl, image_data:null, prompt:prompt.trim(), user_id:"local_user", user_email:"demo@omnira.ai",
+            style_used:actual, resolution:`${res.w}×${res.h}`, timestamp:new Date().toISOString(), alpha_verified:true };
+      }
+      setResult(r);
+      setHistory(prev=>[r,...prev.slice(0,11)]);
+    } catch(e) {
+      setError(e.message||"Gagal generate gambar");
+    } finally {
+      setLoading(false);
+    }
+  },[prompt,style,res,seed,useServer]);
+
+  const getImgSrc=(item)=> item.image_url?.startsWith("data:")?item.image_url
+    : item.image_data?`data:image/png;base64,${item.image_data}`:item.image_url;
+
+  const handleDownload=(item)=>{
+    const a=document.createElement("a"); a.href=getImgSrc(item);
+    a.download=`omnira_${item.style_used||"image"}_${Date.now()}.png`; a.click();
+  };
+
+  const C = {
+    card:  {background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:14,padding:18},
+    label: {fontSize:11,color:"#8b5cf6",letterSpacing:2,display:"block",marginBottom:8,fontWeight:700},
+    inp:   {width:"100%",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,color:"#e2d9f3",padding:"10px 12px",fontSize:13,boxSizing:"border-box",outline:"none"},
+    g2:    {display:"grid",gridTemplateColumns:"1fr 1fr",gap:14},
+  };
+
+  return (
+    <>
+      <style>{`
+        @keyframes spin{to{transform:rotate(360deg)}}
+        @keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.35}}
+        .os-sty:hover{border-color:rgba(139,92,246,0.6)!important;background:rgba(139,92,246,0.12)!important}
+        .os-sty-on{border-color:#8b5cf6!important;background:rgba(139,92,246,0.2)!important;color:#c4b5fd!important}
+        .os-tab-on{background:rgba(139,92,246,0.2)!important;color:#c4b5fd!important;border-color:rgba(139,92,246,0.4)!important}
+        .os-hist{transition:all 0.2s;cursor:pointer}
+        .os-hist:hover{transform:scale(1.04);box-shadow:0 6px 24px rgba(139,92,246,0.35)}
+        .os-gbtn:hover{background:#7c3aed!important;transform:translateY(-1px)}
+        select option{background:#1a1a2e;color:#e2d9f3}
+      `}</style>
+
+      <div style={{fontFamily:"system-ui,sans-serif",background:"linear-gradient(135deg,#0d0d1a,#0f0a1e,#0a0d1a)",minHeight:"100vh",color:"#e2d9f3",padding:"20px 14px"}}>
+        <div style={{maxWidth:920,margin:"0 auto"}}>
+
+          {/* HEADER */}
+          <div style={{textAlign:"center",marginBottom:24}}>
+            <div style={{display:"inline-flex",alignItems:"center",gap:8,background:"rgba(139,92,246,0.1)",border:"1px solid rgba(139,92,246,0.2)",borderRadius:999,padding:"5px 16px",marginBottom:12}}>
+              <span style={{width:7,height:7,background:"#34d399",borderRadius:"50%",animation:"pulse 2s infinite"}}/>
+              <span style={{fontSize:11,color:"#a78bfa",letterSpacing:2}}>OMNIRA SYNORA v2.1</span>
+            </div>
+            <h1 style={{margin:0,fontSize:"clamp(22px,5vw,40px)",fontWeight:800,
+              background:"linear-gradient(135deg,#c4b5fd,#818cf8,#38bdf8)",
+              WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",lineHeight:1.1}}>
+              AI Image Generator
+            </h1>
+            <p style={{margin:"7px 0 0",color:"#4b5563",fontSize:12}}>
+              True Alpha · Flower · Isometric · 11 Styles · Base44 Native
+            </p>
+          </div>
+
+          {/* MODE TOGGLE */}
+          <div style={{display:"flex",justifyContent:"center",marginBottom:16}}>
+            <div style={{background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:10,padding:"7px 14px",display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:11,color:"#6b7280"}}>Mode:</span>
+              {[{v:false,l:"🖥️ Offline / Demo"},{v:true,l:"🌐 Server API"}].map(({v,l})=>(
+                <button key={String(v)} onClick={()=>setUseServer(v)}
+                  style={{background:useServer===v?"rgba(139,92,246,0.25)":"transparent",border:"1px solid",
+                    borderColor:useServer===v?"#8b5cf6":"rgba(255,255,255,0.1)",color:useServer===v?"#c4b5fd":"#6b7280",
+                    borderRadius:6,padding:"4px 11px",fontSize:11,cursor:"pointer",transition:"all 0.15s"}}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* TABS */}
+          <div style={{display:"flex",gap:8,marginBottom:18,justifyContent:"center"}}>
+            {[["generate","✦ Generate"],["gallery","⊞ Gallery"]].map(([t,l])=>(
+              <button key={t} className={`os-gbtn ${tab===t?"os-tab-on":""}`} onClick={()=>setTab(t)}
+                style={{background:"transparent",border:"1px solid rgba(255,255,255,0.1)",color:"#9ca3af",
+                  borderRadius:8,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,transition:"all 0.2s"}}>
+                {l}
+              </button>
+            ))}
+          </div>
+
+          {/* ── GENERATE TAB ── */}
+          {tab==="generate" && (
+            <div style={C.g2}>
+
+              {/* LEFT */}
+              <div style={{display:"flex",flexDirection:"column",gap:13}}>
+
+                <div style={C.card}>
+                  <label style={C.label}>PROMPT</label>
+                  <textarea value={prompt} onChange={e=>setPrompt(e.target.value)}
+                    onKeyDown={e=>{if(e.key==="Enter"&&(e.ctrlKey||e.metaKey))handleGenerate();}}
+                    placeholder="Deskripsikan gambar... (Ctrl+Enter generate)"
+                    rows={4}
+                    style={{...C.inp,resize:"vertical"}}
+                  />
+                  <div style={{marginTop:8,display:"flex",gap:5,flexWrap:"wrap"}}>
+                    {SAMPLE_PROMPTS.map(s=>(
+                      <button key={s} onClick={()=>setPrompt(s)}
+                        style={{background:"rgba(139,92,246,0.1)",border:"1px solid rgba(139,92,246,0.2)",
+                          color:"#a78bfa",borderRadius:6,padding:"3px 9px",fontSize:10,cursor:"pointer"}}>
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={C.card}>
+                  <label style={C.label}>STYLE</label>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
+                    {STYLES.map(s=>(
+                      <button key={s.value} className={`os-sty ${style===s.value?"os-sty-on":""}`} onClick={()=>setStyle(s.value)}
+                        style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",
+                          color:style===s.value?"#c4b5fd":"#9ca3af",borderRadius:7,padding:"7px 9px",
+                          cursor:"pointer",textAlign:"left",fontSize:11,fontWeight:600,transition:"all 0.15s"}}>
+                        {s.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={C.g2}>
+                  <div style={C.card}>
+                    <label style={C.label}>RESOLUSI</label>
+                    <select value={`${res.w}x${res.h}`} onChange={e=>setRes(RESOLUTIONS.find(r=>`${r.w}x${r.h}`===e.target.value))}
+                      style={{...C.inp,cursor:"pointer"}}>
+                      {RESOLUTIONS.map(r=><option key={r.label} value={`${r.w}x${r.h}`}>{r.label}</option>)}
+                    </select>
+                  </div>
+                  <div style={C.card}>
+                    <label style={C.label}>SEED</label>
+                    <input type="number" value={seed} onChange={e=>setSeed(e.target.value)} placeholder="acak" style={C.inp}/>
+                  </div>
+                </div>
+
+                <button className="os-gbtn" onClick={handleGenerate} disabled={loading||!prompt.trim()}
+                  style={{background:loading||!prompt.trim()?"rgba(139,92,246,0.35)":"#8b5cf6",color:"#fff",border:"none",
+                    borderRadius:10,padding:"14px",fontSize:15,fontWeight:700,cursor:loading||!prompt.trim()?"not-allowed":"pointer",
+                    width:"100%",transition:"all 0.2s",display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
+                  {loading?(
+                    <><div style={{width:20,height:20,border:"2px solid rgba(255,255,255,0.3)",borderTop:"2px solid #fff",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/><span>Generating...</span></>
+                  ):"✦ Generate Image"}
+                </button>
+
+                {loading&&(
+                  <div style={{height:4,background:"rgba(255,255,255,0.06)",borderRadius:999,overflow:"hidden"}}>
+                    <div style={{height:"100%",width:`${progress}%`,background:"linear-gradient(90deg,#8b5cf6,#38bdf8)",borderRadius:999,transition:"width 0.3s"}}/>
+                  </div>
+                )}
+
+                {error&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:10,padding:"10px 14px",color:"#fca5a5",fontSize:12}}>⚠ {error}</div>}
+              </div>
+
+              {/* RIGHT - Result */}
+              <div>
+                {result?(
+                  <div style={{animation:"fadeUp 0.4s ease"}}>
+                    <div style={{borderRadius:14,overflow:"hidden",border:"1px solid rgba(139,92,246,0.35)",
+                      background:"repeating-conic-gradient(rgba(255,255,255,0.05) 0% 25%,rgba(0,0,0,0.05) 0% 50%) 0 0/16px 16px",
+                      marginBottom:12,position:"relative"}}>
+                      <img src={getImgSrc(result)} alt={result.prompt} style={{width:"100%",display:"block",borderRadius:14}}/>
+                      <div style={{position:"absolute",top:8,right:8,background:"rgba(0,0,0,0.75)",borderRadius:6,
+                        padding:"3px 8px",fontSize:10,color:"#34d399",border:"1px solid rgba(52,211,153,0.3)"}}>
+                        ✓ TRUE ALPHA
+                      </div>
+                      <div style={{position:"absolute",top:8,left:8,background:"rgba(0,0,0,0.75)",borderRadius:6,
+                        padding:"3px 8px",fontSize:10,color:"#a78bfa"}}>
+                        {result.style_used}
+                      </div>
+                    </div>
+
+                    <div style={{...C.card,marginBottom:10}}>
+                      <div style={C.g2}>
+                        {[["Style",result.style_used],["Resolusi",result.resolution],
+                          ["User",result.user_email?.split("@")[0]||"local"],
+                          ["Waktu",new Date(result.timestamp).toLocaleTimeString("id")]
+                        ].map(([k,v])=>(
+                          <div key={k}>
+                            <div style={{fontSize:10,color:"#6b7280",letterSpacing:1,marginBottom:2}}>{k}</div>
+                            <div style={{fontSize:12,color:"#c4b5fd",fontWeight:600}}>{v}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button onClick={()=>handleDownload(result)}
+                      style={{width:"100%",background:"rgba(52,211,153,0.12)",border:"1px solid rgba(52,211,153,0.3)",
+                        color:"#34d399",borderRadius:10,padding:"11px",fontSize:13,cursor:"pointer",fontWeight:600}}>
+                      ⬇ Download PNG (True Alpha)
+                    </button>
+                  </div>
+                ):(
+                  <div style={{minHeight:360,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,
+                    border:"1px dashed rgba(255,255,255,0.08)",borderRadius:14,background:"rgba(255,255,255,0.02)"}}>
+                    <span style={{fontSize:40}}>✦</span>
+                    <p style={{color:"#374151",fontSize:12,textAlign:"center",maxWidth:170,margin:0}}>
+                      Tulis prompt lalu klik Generate
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── GALLERY TAB ── */}
+          {tab==="gallery"&&(
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+                <h3 style={{margin:0,color:"#a78bfa",fontWeight:700}}>Riwayat ({history.length})</h3>
+                <button onClick={loadHistory} style={{background:"rgba(139,92,246,0.1)",border:"1px solid rgba(139,92,246,0.2)",color:"#a78bfa",borderRadius:7,padding:"5px 12px",cursor:"pointer",fontSize:12}}>↻ Refresh</button>
+              </div>
+              {history.length===0?(
+                <div style={{textAlign:"center",padding:60,color:"#4b5563"}}>Belum ada gambar. Generate sekarang!</div>
+              ):(
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(185px,1fr))",gap:13}}>
+                  {history.map((item,i)=>(
+                    <div key={i} className="os-hist" onClick={()=>handleDownload(item)}
+                      style={{borderRadius:11,overflow:"hidden",border:"1px solid rgba(255,255,255,0.08)",
+                        background:"repeating-conic-gradient(rgba(255,255,255,0.04) 0% 25%,transparent 0% 50%) 0 0/14px 14px"}}>
+                      <img src={getImgSrc(item)} alt={item.prompt} style={{width:"100%",display:"block"}}/>
+                      <div style={{background:"rgba(0,0,0,0.72)",padding:"6px 9px"}}>
+                        <div style={{fontSize:10,color:"#c4b5fd",fontWeight:600}}>{item.style_used}</div>
+                        <div style={{fontSize:10,color:"#6b7280",marginTop:1}}>{item.prompt?.slice(0,38)}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{textAlign:"center",marginTop:36,color:"#374151",fontSize:10,letterSpacing:2}}>
+            OMNIRA SYNORA · TRUE ALPHA PNG · FLOWER · ISOMETRIC · BASE44
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
